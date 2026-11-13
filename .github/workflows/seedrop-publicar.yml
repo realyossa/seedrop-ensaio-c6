@@ -1,0 +1,80 @@
+# SeeDropHost: publica o site "ensaio-c6" a cada push na branch "main".
+# Gerado por "sdh publicar:fluxo --site ensaio-c6". Este arquivo não guarda nenhum segredo.
+# O comando abaixo vem do seu netlify.toml/seedrop.toml. Se você mudar o comando lá, gere este arquivo de novo:
+# o SeeDropHost recusa o envio quando os dois divergem.
+name: SeeDropHost (ensaio-c6)
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+concurrency:
+  group: seedrophost-ensaio-c6-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  publicar:
+    name: SeeDropHost (ensaio-c6)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SDH_URL: "https://painel.seedrophost.com"
+      SDH_SITE: "ensaio-c6"
+      SDH_COMANDO: "rm -rf privado ferramentas/*.ps1"
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rodar o comando de build
+        shell: bash
+        run: |
+          [ -z "$SDH_COMANDO" ] || bash -e -o pipefail -c "$SDH_COMANDO"
+
+      - name: Montar o pacote do site
+        shell: bash
+        run: |
+          zip -q -r "$RUNNER_TEMP/site.zip" . -x ".git/*" ".github/*" "node_modules/*" "*/node_modules/*"
+          echo "pacote: $(wc -c < "$RUNNER_TEMP/site.zip") bytes"
+
+      - name: Enviar ao SeeDropHost
+        shell: bash
+        run: |
+          hash=$(printf '%s' "$SDH_COMANDO" | sha256sum | cut -d' ' -f1)
+          aud=$(jq -rn --arg v "$SDH_URL" '$v|@uri')
+          codigo=000
+          for tentativa in 1 2; do
+            token=$(printf 'header = "Authorization: Bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" | curl -fsS -K - \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$aud" | jq -r '.value // empty') || token=""
+            if [ -n "$token" ]; then
+              echo "::add-mask::$token"
+              codigo=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS -K - \
+                -o "$RUNNER_TEMP/resposta.json" -w '%{http_code}' -X POST \
+                -H "content-type: application/zip" -H "x-sdh-actor: github-actions" -H "x-sdh-comando: $hash" \
+                --data-binary "@$RUNNER_TEMP/site.zip" \
+                "$SDH_URL/v1/sites/$SDH_SITE/deploys/zip?origem=github-actions&construido=1") || codigo=000
+            else
+              codigo=000
+            fi
+            case "$codigo" in 5??|000) [ "$tentativa" = 1 ] && { sleep 5; continue; } ;; esac
+            break
+          done
+          if [ "${codigo:0:1}" != "2" ]; then
+            mensagem=$(jq -r '.error.message // empty' "$RUNNER_TEMP/resposta.json" 2>/dev/null || true)
+            [ -n "$mensagem" ] || mensagem="o SeeDropHost não respondeu (HTTP $codigo). Rode de novo em alguns minutos."
+            echo "::error::O SeeDropHost não aceitou o envio (HTTP $codigo): $mensagem"
+            { echo "### O SeeDropHost não publicou"; echo "$mensagem"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          jq -r --arg site "$SDH_SITE" '"### Enviado ao SeeDropHost", "- Versão: \(.deploy.id)", "- Prévia: \(.urls.deploy)",
+            (if .deploy.draft == 1 then "- Rascunho: nada mudou no ar; publique com sdh publish \($site) \(.deploy.id)" else "- No ar: \(.urls.site)" end),
+            ((.deploy.report.avisos // [])[] | "- Aviso: \(.)")' "$RUNNER_TEMP/resposta.json" >> "$GITHUB_STEP_SUMMARY"
