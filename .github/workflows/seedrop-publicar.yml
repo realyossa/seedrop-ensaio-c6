@@ -28,7 +28,7 @@ jobs:
     env:
       SDH_URL: "https://painel.seedrophost.com"
       SDH_SITE: "ensaio-c6"
-      SDH_COMANDO: "rm -rf privado ferramentas/*.ps1"
+      SDH_COMANDO: "rm -rf ferramentas/*.ps1"
     steps:
       - name: Baixar o código
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
