@@ -1,6 +1,6 @@
 [build]
   publish = "."
-  command = "rm -rf ferramentas/*.ps1"
+  command = "rm -rf privado ferramentas/*.ps1"
 
 [[redirects]]
   from = "/privado/*"
