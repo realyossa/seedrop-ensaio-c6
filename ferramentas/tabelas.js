@@ -1,0 +1,1 @@
+console.log('ferramenta pública');
