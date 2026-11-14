@@ -326,10 +326,10 @@ jobs:
           SDH_FIM_DO_EMPACOTADOR
           node "$RUNNER_TEMP/sdh-empacotar.mjs"
 
-      - name: "Ensaio F1 (prova negativa): adulterar o manifesto"
+      - name: "Ensaio F1 (prova negativa): função sem pacote"
         shell: bash
         run: |
-          node -e 'const f=".sdh/functions.json";const m=JSON.parse(require("fs").readFileSync(f,"utf8"));m.funcoes[0].sha256="0".repeat(64);require("fs").writeFileSync(f,JSON.stringify(m,null,2));console.log("ADULTERADO: sha256 de "+m.funcoes[0].nome+" trocado")'
+          rm .sdh/functions/prova.mjs && echo "SEM PACOTE: .sdh/functions/prova.mjs apagado, o manifesto continua listando prova"
 
       - name: Montar o pacote do site
         shell: bash
