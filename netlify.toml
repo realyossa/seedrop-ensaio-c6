@@ -1,5 +1,5 @@
 [build]
-  publish = "."
+  publish = ".sdh"
   command = "rm -rf privado ferramentas/*.ps1"
 
 [[redirects]]
