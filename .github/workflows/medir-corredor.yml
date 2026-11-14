@@ -1,0 +1,22 @@
+# Ensaio F1: só mede o corredor (versão do Node e tempo do npm install do esbuild). Não publica nada.
+name: Medir o corredor
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  medir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Node e npm do corredor
+        run: |
+          echo "node $(node --version)"; echo "npm $(npm --version)"; echo "imagem $ImageOS $ImageVersion"
+          { echo "- node $(node --version)"; echo "- npm $(npm --version)"; echo "- imagem $ImageOS $ImageVersion"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Tempo do npm install do esbuild
+        run: |
+          inicio=$(date +%s%N)
+          (cd "$RUNNER_TEMP" && npm install --prefix "$RUNNER_TEMP/sdh-esbuild" --no-save --no-package-lock --no-audit --no-fund --ignore-scripts --loglevel=error esbuild@0.28.2)
+          fim=$(date +%s%N)
+          ms=$(( (fim - inicio) / 1000000 ))
+          echo "npm install esbuild@0.28.2: ${ms} ms"; echo "- npm install esbuild@0.28.2: ${ms} ms" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,7 @@
+{
+  "name": "seedrop-ensaio-c6",
+  "private": true,
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}

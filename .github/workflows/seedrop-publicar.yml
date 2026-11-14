@@ -2,6 +2,8 @@
 # Gerado por "sdh publicar:fluxo --site ensaio-c6". Este arquivo não guarda nenhum segredo.
 # O comando abaixo vem do seu netlify.toml/seedrop.toml. Se você mudar o comando lá, gere este arquivo de novo:
 # o SeeDropHost recusa o envio quando os dois divergem.
+# As funções de netlify/functions são empacotadas aqui (esbuild 0.28.2): cada uma vira um arquivo só, com o TypeScript,
+# a lib/ e as dependências dentro. O SeeDropHost confere cada pacote ao receber.
 name: SeeDropHost (ensaio-c6)
 
 on:
@@ -39,6 +41,290 @@ jobs:
         shell: bash
         run: |
           [ -z "$SDH_COMANDO" ] || bash -e -o pipefail -c "$SDH_COMANDO"
+
+      - name: Instalar as dependências
+        shell: bash
+        run: |
+          if [ -d node_modules ]; then
+            echo "node_modules já existe: o comando de build instalou as dependências."
+          elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            echo "sem package-lock.json: nada a instalar."
+          fi
+
+      - name: Empacotar as funções
+        shell: bash
+        env:
+          SDH_FUNCOES: "netlify/functions"
+        run: |
+          (cd "$RUNNER_TEMP" && npm install --prefix "$RUNNER_TEMP/sdh-esbuild" --no-save --no-package-lock --no-audit --no-fund --ignore-scripts --loglevel=error esbuild@0.28.2)
+          cat > "$RUNNER_TEMP/sdh-empacotar.mjs" <<'SDH_FIM_DO_EMPACOTADOR'
+          // SeeDropHost: empacotador das funções (gerado por "sdh publicar:fluxo"; o mesmo texto para todos os sites).
+          // Cada arquivo do primeiro nível da pasta de funções vira um arquivo .mjs só, com o TypeScript, a lib/ e as
+          // dependências dentro (esbuild), em .sdh/functions/<nome>.mjs, e o manifesto vai para .sdh/functions.json.
+          // O SeeDropHost confere tudo de novo ao receber o envio: este arquivo não decide nada sozinho.
+          // Roda com o Node do GitHub Actions (20 ou mais novo) e não lê nenhuma variável além das abaixo.
+          import { createHash } from "node:crypto";
+          import { spawnSync } from "node:child_process";
+          import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { join, relative, resolve } from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          const VERSAO_DO_ESBUILD = "0.28.2";
+          const MAX_FUNCOES = 100;
+          const MAX_PACOTE = 4 * 1024 * 1024;
+          const TEMPO_PARA_CARREGAR_MS = 10_000;
+          const NOME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+          // a ordem importa: ".mts" antes de ".ts"
+          const EXTENSOES = [".mts", ".cts", ".ts", ".mjs", ".cjs", ".js"];
+          const TESTE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+          const DECLARACAO_RE = /\.d\.[cm]?ts$/;
+          const JSX_RE = /\.[jt]sx$/;
+
+          const raiz = process.cwd();
+          const temp = process.env.RUNNER_TEMP || tmpdir();
+
+          function falhar(mensagem) {
+            const linha = mensagem.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+            console.log(`::error::${linha}`);
+            if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### O SeeDropHost não publicou\n${mensagem}\n`);
+            process.exit(1);
+          }
+
+          // ---------------------------------------------------------------- a pasta e as dependências
+
+          const pasta = (process.env.SDH_FUNCOES || "").replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+          if (!pasta || !/^[A-Za-z0-9._/-]+$/.test(pasta) || pasta.split("/").some((s) => s === "" || s === "." || s === "..")) {
+            falhar(`a pasta de funções "${pasta}" não vale. Gere o fluxo de novo (sdh publicar:fluxo --site <site> --de .).`);
+          }
+          const dir = resolve(raiz, pasta);
+          if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+            falhar(`a pasta de funções ${pasta} não existe neste repositório. Se o site não tem mais funções, gere o fluxo de novo sem elas (sdh publicar:fluxo --site <site> --de .).`);
+          }
+
+          const temDependencias = (() => {
+            const arquivo = join(raiz, "package.json");
+            if (!existsSync(arquivo)) return false;
+            let pkg;
+            try {
+              pkg = JSON.parse(readFileSync(arquivo, "utf8"));
+            } catch {
+              falhar("o package.json da raiz do repositório não é um JSON válido.");
+            }
+            return ["dependencies", "devDependencies", "optionalDependencies"].some((k) => pkg && pkg[k] && Object.keys(pkg[k]).length > 0);
+          })();
+          const temLockfile = existsSync(join(raiz, "package-lock.json")) || existsSync(join(raiz, "npm-shrinkwrap.json"));
+          if (temDependencias && !temLockfile && !existsSync(join(raiz, "node_modules"))) {
+            falhar(
+              "o package.json tem dependências, mas o repositório não tem package-lock.json e nada foi instalado. Rode npm install na sua máquina (ele gera o package-lock.json) e faça o commit do arquivo, ou instale as dependências no comando de build.",
+            );
+          }
+
+          // ---------------------------------------------------------------- as funções da pasta
+
+          const funcoes = [];
+          const avisos = [];
+          // todo arquivo tem destino dito: entrada (vira pacote), apoio (lib/, JSON; entra se importado) ou ignorado com aviso
+          // (a mesma regra do servidor, destinoNaPastaDeFuncoes, que também põe esses avisos no relatório do deploy)
+          // link simbólico é seguido, como o zip do envio faz (zip -r guarda o conteúdo do alvo); oculto (.eslintrc.cjs) é apoio
+          function tipoDe(item) {
+            if (!item.isSymbolicLink()) return item.isDirectory() ? "pasta" : item.isFile() ? "arquivo" : null;
+            try {
+              const alvo = statSync(join(dir, item.name));
+              return alvo.isDirectory() ? "pasta" : alvo.isFile() ? "arquivo" : null;
+            } catch {
+              return "quebrado";
+            }
+          }
+          for (const item of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+            if (item.name.startsWith(".")) continue;
+            const tipo = tipoDe(item);
+            if (tipo === "quebrado") {
+              avisos.push(`${pasta}/${item.name} é um link simbólico que não aponta para nada e não vira função.`);
+              continue;
+            }
+            if (tipo === "pasta") {
+              if (item.name === "lib") continue;
+              const dentro = readdirSync(join(dir, item.name));
+              if (dentro.some((f) => [...EXTENSOES, ".tsx", ".jsx"].some((e) => (f === `index${e}` || f === `${item.name}${e}`)))) {
+                avisos.push(`a subpasta ${pasta}/${item.name}/ não vira função (só os arquivos do primeiro nível viram). Se ela é uma função, mova o arquivo para ${pasta}/${item.name}.<extensão>.`);
+              }
+              continue;
+            }
+            if (tipo !== "arquivo") continue;
+            if (DECLARACAO_RE.test(item.name)) {
+              avisos.push(`${pasta}/${item.name} é declaração de tipos (.d.ts) e não vira função.`);
+              continue;
+            }
+            if (TESTE_RE.test(item.name)) {
+              avisos.push(`${pasta}/${item.name} é teste (.test ou .spec) e não vira função. Se é uma função, tire o .test ou o .spec do nome.`);
+              continue;
+            }
+            if (JSX_RE.test(item.name)) {
+              avisos.push(`${pasta}/${item.name} é .tsx ou .jsx e não vira função. Se é uma função, escreva-a sem JSX, em .ts, .mts, .js ou .mjs.`);
+              continue;
+            }
+            const ext = EXTENSOES.find((e) => item.name.endsWith(e));
+            if (!ext) continue; // apoio (JSON, package.json…): entra no pacote se alguma função importar
+            const nome = item.name.slice(0, -ext.length);
+            if (!NOME_RE.test(nome)) {
+              falhar(`o nome da função ${pasta}/${item.name} não vale: use só letras sem acento, números, - e _ (até 64).`);
+            }
+            const igual = funcoes.find((f) => f.nome.toLowerCase() === nome.toLowerCase());
+            if (igual) falhar(`dois arquivos dão a mesma função "${nome}": ${pasta}/${igual.arquivoFonte} e ${pasta}/${item.name}. Deixe só um.`);
+            funcoes.push({ nome, arquivoFonte: item.name });
+          }
+          if (funcoes.length > MAX_FUNCOES) falhar(`a pasta ${pasta} tem ${funcoes.length} funções; o máximo é ${MAX_FUNCOES}.`);
+          for (const a of avisos) console.log(`::warning::${a}`);
+
+          // ---------------------------------------------------------------- o esbuild, na versão fixada
+
+          const caminhoDoEsbuild = process.env.SDH_ESBUILD || join(temp, "sdh-esbuild", "node_modules", "esbuild");
+          let esbuild;
+          try {
+            const m = await import(pathToFileURL(join(caminhoDoEsbuild, "lib", "main.js")).href);
+            esbuild = m.default && m.default.build ? m.default : m;
+          } catch {
+            falhar(`não achei o esbuild ${VERSAO_DO_ESBUILD} (o passo anterior o instala). Rode o fluxo de novo.`);
+          }
+          if (esbuild.version !== VERSAO_DO_ESBUILD) falhar(`o esbuild instalado é ${esbuild.version}, e o fluxo pede ${VERSAO_DO_ESBUILD}. Rode o fluxo de novo.`);
+
+          const saida = join(raiz, ".sdh", "functions");
+          rmSync(saida, { recursive: true, force: true });
+          rmSync(join(raiz, ".sdh", "functions.json"), { force: true });
+          mkdirSync(saida, { recursive: true });
+
+          // Cabeçalho de cada pacote: pacotes CommonJS dentro do arquivo pedem módulos do Node com require, e o SeeDropHost carrega
+          // a função de um endereço data: (sem require próprio).
+          const CABECALHO = 'import { createRequire as __sdhCreateRequire } from "node:module";\nglobalThis.require ??= __sdhCreateRequire("/sdh-funcao.mjs");';
+
+          // Entrada de cada função: reexporta handler (formato clássico), default (formato moderno) e config, venha a função em
+          // CommonJS (exports.handler) ou em ESM (export const handler / export default).
+          function entrada(arquivoFonte) {
+            return [
+              `import * as m from ${JSON.stringify(`./${arquivoFonte}`)};`,
+              "const d = m.default;",
+              'export const handler = typeof m.handler === "function" ? m.handler : d && typeof d.handler === "function" ? d.handler : undefined;',
+              'const moderno = typeof d === "function" ? d : undefined;',
+              "export { moderno as default };",
+              'export const config = m.config !== undefined ? m.config : d && typeof d === "object" && d.config !== undefined ? d.config : undefined;',
+              "",
+            ].join("\n");
+          }
+
+          function causaDoEsbuild(nome, e) {
+            const erros = (e && Array.isArray(e.errors) && e.errors) || [];
+            const primeiro = erros[0];
+            if (!primeiro) return `a função ${nome} não pôde ser empacotada.`;
+            // o esbuild dá o arquivo relativo a absWorkingDir (a raiz do repositório)
+            const onde = primeiro.location ? ` (${relative(raiz, resolve(raiz, primeiro.location.file))}:${primeiro.location.line})` : "";
+            const pacote = /^Could not resolve "([^"]+)"/.exec(primeiro.text);
+            if (pacote && !pacote[1].startsWith(".") && !pacote[1].startsWith("/")) {
+              return `a função ${nome} importa o pacote "${pacote[1]}"${onde}, que não está instalado. Ponha o pacote no package.json, rode npm install (gera o package-lock.json) e faça o commit dos dois.`;
+            }
+            if (/No loader is configured for "\.node" files/.test(primeiro.text)) {
+              return `a função ${nome} usa um pacote com código nativo (arquivo .node)${onde}, que não roda no SeeDropHost.`;
+            }
+            // só o texto do esbuild, nunca a linha do código (o log de um repositório público é público)
+            return `a função ${nome} não pôde ser empacotada${onde}: ${primeiro.text.split("\n")[0].slice(0, 300)}`;
+          }
+
+          // Lê config e o formato importando o pacote num processo à parte, sem nenhuma variável de ambiente, do mesmo jeito que o
+          // SeeDropHost carrega a função (endereço data:).
+          const LEITOR = [
+            'import { readFileSync, writeFileSync } from "node:fs";',
+            "const [arquivo, resultado] = process.argv.slice(1);",
+            "let r;",
+            "try {",
+            '  const m = await import("data:text/javascript;base64," + readFileSync(arquivo).toString("base64"));',
+            '  r = { handler: typeof m.handler === "function", moderno: typeof m.default === "function", config: m.config === undefined || m.config === null ? null : JSON.parse(JSON.stringify(m.config)) };',
+            "} catch (e) {",
+            '  r = { erro: String((e && e.message) || e).split("\\n")[0].slice(0, 300) };',
+            "}",
+            "writeFileSync(resultado, JSON.stringify(r));",
+            "process.exit(0);",
+          ].join("\n");
+
+          function lerConfig(nome, pacote) {
+            const pastaTemp = mkdtempSync(join(temp, "sdh-config-"));
+            const resultado = join(pastaTemp, "r.json");
+            const r = spawnSync(process.execPath, ["--input-type=module", "-e", LEITOR, pacote, resultado], {
+              cwd: pastaTemp,
+              env: {},
+              stdio: "ignore",
+              timeout: TEMPO_PARA_CARREGAR_MS,
+            });
+            let lido = null;
+            try {
+              lido = JSON.parse(readFileSync(resultado, "utf8"));
+            } catch {
+              lido = null;
+            }
+            rmSync(pastaTemp, { recursive: true, force: true });
+            if (r.error || r.signal || !lido) {
+              falhar(`a função ${nome} não terminou de carregar em ${TEMPO_PARA_CARREGAR_MS / 1000} s (o código no topo do arquivo espera rede, banco ou um temporizador?). Leve esse código para dentro da função.`);
+            }
+            if (lido.erro) {
+              falhar(`a função ${nome} falhou ao carregar: ${lido.erro}. O empacotador carrega o arquivo sem nenhuma variável de ambiente; código no topo do arquivo que depende delas tem de ir para dentro da função.`);
+            }
+            return lido;
+          }
+
+          const listaDeTextos = (v, campo, nome) => {
+            if (v === undefined || v === null) return [];
+            if (typeof v === "string") return [v];
+            if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v;
+            falhar(`config.${campo} da função ${nome} tem de ser um texto ou uma lista de textos.`);
+          };
+
+          // ---------------------------------------------------------------- empacotar
+
+          const manifesto = { versao: 1, empacotador: `esbuild@${VERSAO_DO_ESBUILD}`, pasta, funcoes: [] };
+          for (const f of funcoes) {
+            const pacote = join(saida, `${f.nome}.mjs`);
+            try {
+              await esbuild.build({
+                stdin: { contents: entrada(f.arquivoFonte), resolveDir: dir, sourcefile: `entrada-${f.nome}.mjs`, loader: "js" },
+                absWorkingDir: raiz,
+                bundle: true,
+                platform: "node",
+                format: "esm",
+                target: "node24",
+                outfile: pacote,
+                banner: { js: CABECALHO },
+                logLevel: "silent",
+                write: true,
+              });
+            } catch (e) {
+              falhar(causaDoEsbuild(f.nome, e));
+            }
+            const bytes = readFileSync(pacote);
+            if (bytes.length > MAX_PACOTE) {
+              falhar(`a função ${f.nome} ficou com ${(bytes.length / 1024 / 1024).toFixed(1)} MB depois de empacotada; o máximo é 4 MB. Tire dependências que ela não usa.`);
+            }
+            const lido = lerConfig(f.nome, pacote);
+            if (!lido.handler && !lido.moderno) falhar(`a função ${f.nome} não exporta handler nem default.`);
+            const config = lido.config && typeof lido.config === "object" ? lido.config : {};
+            const limite = config.rateLimit && typeof config.rateLimit === "object" ? { max: config.rateLimit.windowLimit, janela: config.rateLimit.windowSize } : null;
+            manifesto.funcoes.push({
+              nome: f.nome,
+              arquivo: `.sdh/functions/${f.nome}.mjs`,
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              formato: lido.handler ? "v1" : "v2",
+              rotas: listaDeTextos(config.path, "path", f.nome),
+              metodos: listaDeTextos(config.method, "method", f.nome).map((x) => x.toUpperCase()),
+              agenda: typeof config.schedule === "string" ? config.schedule : null,
+              preferirEstatico: config.preferStatic === true,
+              limite,
+            });
+            console.log(`${f.nome}: ${lido.handler ? "v1" : "v2"}, ${Math.max(1, Math.round(bytes.length / 1024))} KB`);
+          }
+          writeFileSync(join(raiz, ".sdh", "functions.json"), JSON.stringify(manifesto, null, 2) + "\n");
+          console.log(`${manifesto.funcoes.length} função(ões) empacotada(s) em .sdh/functions (esbuild ${VERSAO_DO_ESBUILD}).`);
+          SDH_FIM_DO_EMPACOTADOR
+          node "$RUNNER_TEMP/sdh-empacotar.mjs"
 
       - name: Montar o pacote do site
         shell: bash
