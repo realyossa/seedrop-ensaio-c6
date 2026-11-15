@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   construir:
-    name: SeeDropHost (ensaio-c6): construir
+    name: "SeeDropHost (ensaio-c6): construir"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
