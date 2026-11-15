@@ -6,7 +6,7 @@
 # O comando roda na pasta-base "site-b"; publish e a pasta das funções contam a partir dela. Vale o seedrop.toml
 # ou o netlify.toml de site-b e, se lá não houver nenhum, o da raiz do repositório.
 # Os caminhos da lista "nunca publicar" do site são tirados do pacote antes do envio; o SeeDropHost recusa o que escapar.
-name: SeeDropHost (ensaio-c6)
+name: "SeeDropHost (ensaio-c6)"
 
 on:
   push:
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: seedrophost-ensaio-c6-${{ github.ref }}
+  group: "seedrophost-ensaio-c6-${{ github.ref }}"
   cancel-in-progress: true
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Usar o Node 22
+      - name: "Usar o Node 22"
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
@@ -401,7 +401,7 @@ jobs:
           overwrite: true
 
   publicar:
-    name: SeeDropHost (ensaio-c6)
+    name: "SeeDropHost (ensaio-c6)"
     needs: construir
     runs-on: ubuntu-latest
     timeout-minutes: 5
