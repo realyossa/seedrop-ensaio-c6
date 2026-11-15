@@ -1,4 +1,5 @@
 # SeeDropHost: publica o site "ensaio-c6" a cada push na branch "main".
+# E também pela agenda "55 * * * *", em UTC (no horário de Brasília, 3 horas a menos), só na branch padrão do repositório.
 # Gerado pelo SeeDropHost (ferramenta get_publish_workflow do conector, site ensaio-c6). Este arquivo não guarda nenhum segredo.
 # O comando abaixo vem do seu netlify.toml/seedrop.toml. Se você mudar o comando lá, gere este arquivo de novo:
 # o SeeDropHost recusa o envio quando os dois divergem.
@@ -11,6 +12,8 @@ on:
   push:
     branches: ["main"]
     paths-ignore: ["**.md"]
+  schedule:
+    - cron: "55 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -28,13 +31,20 @@ jobs:
     permissions:
       contents: read
     env:
-      SDH_COMANDO: "mkdir -p publico && cp -r fonte/. publico/"
+      SDH_COMANDO: "mkdir -p publico && cp -r fonte/. publico/ && node --version > publico/node.txt && git rev-list --count HEAD > publico/commits.txt"
       SDH_BASE: "site-b"
     steps:
       - name: Baixar o código
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Usar o Node 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
 
       - name: Conferir a pasta-base
         shell: bash
@@ -400,7 +410,8 @@ jobs:
     env:
       SDH_URL: "https://painel.seedrophost.com"
       SDH_SITE: "ensaio-c6"
-      SDH_COMANDO: "mkdir -p publico && cp -r fonte/. publico/"
+      SDH_COMANDO: "mkdir -p publico && cp -r fonte/. publico/ && node --version > publico/node.txt && git rev-list --count HEAD > publico/commits.txt"
+      SDH_NODE: "22"
       SDH_BASE: "site-b"
     steps:
       - name: Buscar o pacote
@@ -423,7 +434,7 @@ jobs:
               echo "::add-mask::$token"
               codigo=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS -K - \
                 -o "$RUNNER_TEMP/resposta.json" -w '%{http_code}' -X POST \
-                -H "content-type: application/zip" -H "x-sdh-actor: github-actions" -H "x-sdh-comando: $hash" \
+                -H "content-type: application/zip" -H "x-sdh-actor: github-actions" -H "x-sdh-comando: $hash" -H "x-sdh-node: $SDH_NODE" \
                 --data-binary "@$RUNNER_TEMP/sdh-pacote/site.zip" \
                 "$SDH_URL/v1/sites/$SDH_SITE/deploys/zip?origem=github-actions&construido=1&base=$base") || codigo=000
             else

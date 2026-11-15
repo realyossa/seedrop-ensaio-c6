@@ -1,3 +1,6 @@
 [build]
   publish = "publico"
-  command = "mkdir -p publico && cp -r fonte/. publico/"
+  command = "mkdir -p publico && cp -r fonte/. publico/ && node --version > publico/node.txt && git rev-list --count HEAD > publico/commits.txt"
+
+[build.environment]
+  NODE_VERSION = "22"
