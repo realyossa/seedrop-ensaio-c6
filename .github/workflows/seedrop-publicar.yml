@@ -1,7 +1,8 @@
 # SeeDropHost: publica o site "ensaio-c6" a cada push na branch "main".
-# Gerado por "sdh publicar:fluxo --site ensaio-c6". Este arquivo não guarda nenhum segredo.
+# Gerado pelo SeeDropHost (ferramenta get_publish_workflow do conector, site ensaio-c6). Este arquivo não guarda nenhum segredo.
 # O comando abaixo vem do seu netlify.toml/seedrop.toml. Se você mudar o comando lá, gere este arquivo de novo:
 # o SeeDropHost recusa o envio quando os dois divergem.
+# Os caminhos da lista "nunca publicar" do site são tirados do pacote antes do envio; o SeeDropHost recusa o que escapar.
 # As funções de netlify/functions são empacotadas aqui (esbuild 0.28.2): cada uma vira um arquivo só, com o TypeScript,
 # a lib/ e as dependências dentro. O SeeDropHost confere cada pacote ao receber.
 name: SeeDropHost (ensaio-c6)
@@ -20,16 +21,13 @@ permissions:
   contents: read
 
 jobs:
-  publicar:
-    name: SeeDropHost (ensaio-c6)
+  construir:
+    name: SeeDropHost (ensaio-c6): construir
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      id-token: write
     env:
-      SDH_URL: "https://painel.seedrophost.com"
-      SDH_SITE: "ensaio-c6"
       SDH_COMANDO: "rm -rf privado ferramentas/*.ps1"
     steps:
       - name: Baixar o código
@@ -60,7 +58,7 @@ jobs:
         run: |
           (cd "$RUNNER_TEMP" && npm install --prefix "$RUNNER_TEMP/sdh-esbuild" --no-save --no-package-lock --no-audit --no-fund --ignore-scripts --loglevel=error esbuild@0.28.2)
           cat > "$RUNNER_TEMP/sdh-empacotar.mjs" <<'SDH_FIM_DO_EMPACOTADOR'
-          // SeeDropHost: empacotador das funções (gerado por "sdh publicar:fluxo"; o mesmo texto para todos os sites).
+          // SeeDropHost: empacotador das funções (vem no fluxo gerado pelo SeeDropHost; o mesmo texto para todos os sites).
           // Cada arquivo do primeiro nível da pasta de funções vira um arquivo .mjs só, com o TypeScript, a lib/ e as
           // dependências dentro (esbuild), em .sdh/functions/<nome>.mjs, e o manifesto vai para .sdh/functions.json.
           // O SeeDropHost confere tudo de novo ao receber o envio: este arquivo não decide nada sozinho.
@@ -97,11 +95,11 @@ jobs:
 
           const pasta = (process.env.SDH_FUNCOES || "").replace(/^(\.\/)+/, "").replace(/\/+$/, "");
           if (!pasta || !/^[A-Za-z0-9._/-]+$/.test(pasta) || pasta.split("/").some((s) => s === "" || s === "." || s === "..")) {
-            falhar(`a pasta de funções "${pasta}" não vale. Gere o fluxo de novo (sdh publicar:fluxo --site <site> --de .).`);
+            falhar(`a pasta de funções "${pasta}" não vale. Gere o fluxo de novo com a ferramenta get_publish_workflow do conector.`);
           }
           const dir = resolve(raiz, pasta);
           if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-            falhar(`a pasta de funções ${pasta} não existe neste repositório. Se o site não tem mais funções, gere o fluxo de novo sem elas (sdh publicar:fluxo --site <site> --de .).`);
+            falhar(`a pasta de funções ${pasta} não existe neste repositório. Se o site não tem mais funções, gere o fluxo de novo sem elas com a ferramenta get_publish_workflow do conector.`);
           }
 
           const temDependencias = (() => {
@@ -326,11 +324,353 @@ jobs:
           SDH_FIM_DO_EMPACOTADOR
           node "$RUNNER_TEMP/sdh-empacotar.mjs"
 
+      - name: Tirar o que nunca vai ao ar
+        shell: bash
+        env:
+          SDH_NUNCA_PUBLICAR: "[\"privado/\"]"
+          SDH_PUBLICADA: "\"\""
+          SDH_FUNCOES: "netlify/functions"
+        run: |
+          cat > "$RUNNER_TEMP/sdh-nunca-publicar.mjs" <<'SDH_FIM_DO_NUNCA_PUBLICAR'
+          // SeeDropHost: tira do pacote os arquivos da lista "nunca publicar" do site, antes do envio (o mesmo texto para todos
+          // os sites; a lista e a pasta publicada chegam por variável de ambiente, como dado).
+          // A regra é a mesma do servidor (arquivosProibidos, em packages/core/src/publicacao.ts): cada arquivo da pasta publicada
+          // é conferido como fica no site (/provas/p.html), com a pasta publicada na frente (dist/provas/p.html) e com a pasta-base
+          // e a publicada na frente (site/dist/provas/p.html); sem diferenciar maiúsculas; nomes na forma NFC do Unicode; o que
+          // fica em /.sdh/ (e o arquivo de configuração, que vai para lá) não conta.
+          // As pastas de funções e de funções de borda nunca são tocadas: elas não vão ao ar como arquivo, e o servidor confere o
+          // que há nelas (funções sem empacotar, aviso da borda). Apagar ali calaria essa conferência. São a do fluxo, as padrão
+          // (netlify/functions e netlify/edge-functions) e todo texto das chaves functions, directory e edge_functions do
+          // seedrop.toml e do netlify.toml da pasta-base e da raiz do repositório, em qualquer tabela: sem ler o TOML inteiro,
+          // pega pastas a mais (não apagar é o lado seguro: o servidor recusa ou esconde o que sobrar) e falha se o valor de uma
+          // dessas chaves não é um texto simples entre aspas.
+          // O SeeDropHost confere tudo de novo ao receber: o que escapar daqui é recusado lá.
+          // Roda com o Node do GitHub Actions (20 ou mais novo) e não lê nenhuma variável além das abaixo.
+          import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+          import { dirname, join, resolve, sep } from "node:path";
+
+          const MAX_NO_LOG = 20;
+          // na raiz da pasta publicada, o arquivo de configuração vai para /.sdh/ no site (nunca é servido como arquivo)
+          const CONFIGURACOES = ["/seedrop.toml", "/netlify.toml"];
+
+          function falhar(mensagem) {
+            const linha = mensagem.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+            console.log(`::error::${linha}`);
+            if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### O SeeDropHost não publicou\n${mensagem}\n`);
+            process.exit(1);
+          }
+
+          // ---------------------------------------------------------------- a lista e a pasta publicada
+
+          let lista = null;
+          try {
+            lista = JSON.parse(process.env.SDH_NUNCA_PUBLICAR || "");
+          } catch {
+            lista = null;
+          }
+          if (!Array.isArray(lista) || !lista.every((x) => typeof x === "string" && x !== "")) {
+            falhar("a lista nunca publicar deste fluxo não vale. Gere o fluxo de novo com a ferramenta get_publish_workflow do conector e envie o arquivo para o repositório.");
+          }
+          // a pasta publicada vem em JSON (o $ escapado), na grafia que o servidor aceita para o publish: dentro do repositório
+          let publicada = null;
+          try {
+            publicada = JSON.parse(process.env.SDH_PUBLICADA || "");
+          } catch {
+            publicada = null;
+          }
+          if (typeof publicada !== "string" || (publicada && (/^\/|\/$/.test(publicada) || publicada.split("/").some((s) => s === "" || s === "..")))) {
+            const mostrada = typeof publicada === "string" ? publicada : process.env.SDH_PUBLICADA || "";
+            falhar(`a pasta publicada ${JSON.stringify(mostrada)} deste fluxo não vale. Gere o fluxo de novo com a ferramenta get_publish_workflow do conector.`);
+          }
+          const base = (process.env.SDH_BASE || "").replace(/^\/+|\/+$/g, "");
+
+          // as pastas que o passo nunca toca, relativas à pasta-base (onde o passo roda), como o servidor as confere no pacote
+          const FUNCOES_PADRAO = "netlify/functions";
+          const BORDA_PADRAO = "netlify/edge-functions";
+          const funcoesDoFluxo = process.env.SDH_FUNCOES || "";
+          if (funcoesDoFluxo && (!/^[A-Za-z0-9._/-]+$/.test(funcoesDoFluxo) || funcoesDoFluxo.split("/").some((s) => s === "" || s === "." || s === ".."))) {
+            falhar(`a pasta de funções "${funcoesDoFluxo}" deste fluxo não vale. Gere o fluxo de novo com a ferramenta get_publish_workflow do conector.`);
+          }
+
+          // ---------------------------------------------------------------- as pastas dos arquivos de configuração
+
+          const CHAVES_DE_PASTA = new Set(["functions", "directory", "edge_functions"]);
+
+          // os textos entre aspas de uma linha (posição, valor, e se é simples: numa linha só, sem aspas triplas e sem \), a linha
+          // com eles apagados (para achar as chaves fora deles) e se a linha abre um texto de várias linhas
+          function textosDaLinha(linha) {
+            const textos = [];
+            let mascara = "";
+            let i = 0;
+            let abre = null;
+            while (i < linha.length) {
+              const c = linha[i];
+              if (c === "#") break;
+              if (c !== '"' && c !== "'") {
+                mascara += c;
+                i++;
+                continue;
+              }
+              const triplo = c.repeat(3);
+              let fim;
+              let simples = true;
+              if (linha.startsWith(triplo, i)) {
+                simples = false;
+                const f = linha.indexOf(triplo, i + 3);
+                if (f < 0) abre = triplo;
+                fim = f < 0 ? linha.length : f + 3;
+              } else {
+                let j = i + 1;
+                while (j < linha.length && linha[j] !== c) {
+                  if (c === '"' && linha[j] === "\\") {
+                    simples = false;
+                    j++;
+                  }
+                  j++;
+                }
+                if (j >= linha.length) simples = false;
+                fim = Math.min(j + 1, linha.length);
+              }
+              textos.push({ ini: i, fim, valor: linha.slice(i + 1, fim - 1), simples });
+              // apagado com um caractere que não é espaço nem letra: a posição do texto continua achável depois do =
+              mascara += "\u0001".repeat(fim - i);
+              i = fim;
+            }
+            return { textos, mascara, abre };
+          }
+
+          // todo valor de texto das chaves de pasta de um arquivo de configuração (o arquivo que não existe não dá nada)
+          function pastasDoArquivo(caminho, nome) {
+            if (!existsSync(caminho) || !statSync(caminho).isFile()) return [];
+            const valores = [];
+            let aberto = null;
+            readFileSync(caminho, "utf8").split(/\r?\n/).forEach((linhaInteira, n) => {
+              let linha = linhaInteira;
+              if (aberto) {
+                // dentro de um texto de várias linhas: nada é chave até ele fechar
+                const f = linha.indexOf(aberto);
+                if (f < 0) return;
+                linha = " ".repeat(f + 3) + linha.slice(f + 3);
+                aberto = null;
+              }
+              const { textos, mascara, abre } = textosDaLinha(linha);
+              aberto = abre;
+              const chaves = [];
+              for (const m of mascara.matchAll(/(^|[\s{,.])(functions|directory|edge_functions)\s*=/g)) chaves.push({ chave: m[2], depois: m.index + m[0].length });
+              for (const t of textos) {
+                const m = mascara.slice(t.fim).match(/^\s*=/);
+                if (t.simples && CHAVES_DE_PASTA.has(t.valor) && m && /(^|[\s{,.])$/.test(mascara.slice(0, t.ini))) chaves.push({ chave: t.valor, depois: t.fim + m[0].length });
+              }
+              for (const { chave, depois } of chaves) {
+                const ini = depois + (mascara.slice(depois).length - mascara.slice(depois).trimStart().length);
+                const valor = textos.find((t) => t.ini === ini);
+                if (!valor || !valor.simples) {
+                  falhar(
+                    `${nome}, linha ${n + 1}: a chave ${chave} não está escrita como texto simples entre aspas, e o fluxo precisa dela para não apagar nas pastas de funções. ` +
+                      `Escreva a pasta como texto simples, numa linha só, sem aspas triplas, sem \\ e sem { } (por exemplo: [functions] numa linha e directory = "netlify/functions" na linha seguinte), e rode de novo. Nada foi enviado.`,
+                  );
+                }
+                valores.push(valor.valor);
+              }
+            });
+            return valores;
+          }
+
+          // a pasta como o servidor a acha no pacote: sem ./ e / nas pontas, sem // e /./; "" = a raiz; null = sai do repositório
+          function pastaDoValor(valor) {
+            const partes = valor.trim().normalize("NFC").split("/").filter((s) => s !== "" && s !== ".");
+            return partes.includes("..") ? null : partes.join("/");
+          }
+
+          // a raiz do repositório: o passo roda na pasta-base
+          const raizDoRepo = resolve(process.cwd(), ...base.split("/").filter(Boolean).map(() => ".."));
+          const declaradas = [];
+          for (const dir of new Set([process.cwd(), raizDoRepo])) {
+            const naRaiz = dir !== process.cwd();
+            for (const nome of ["seedrop.toml", "netlify.toml"]) {
+              for (const valor of pastasDoArquivo(join(dir, nome), naRaiz ? `o ${nome} da raiz do repositório` : `o ${nome}`)) {
+                const pasta = pastaDoValor(valor);
+                if (pasta === null) continue;
+                declaradas.push(pasta);
+                // no arquivo da raiz, a pasta pode vir com a pasta-base na frente
+                if (naRaiz && base && pasta.startsWith(`${base}/`)) declaradas.push(pasta.slice(base.length + 1));
+              }
+            }
+          }
+
+          // a pasta que é a publicada ou a contém fica de fora: ali o servidor recusa (funções) ou ignora a declaração (borda), e
+          // tocar nela pararia o passo inteiro
+          const publicadaNFC = publicada.normalize("NFC");
+          const intocadas = [...new Set([funcoesDoFluxo, FUNCOES_PADRAO, BORDA_PADRAO, ...declaradas])].filter(
+            (d) => d !== "" && publicadaNFC !== d && !publicadaNFC.startsWith(`${d}/`),
+          );
+          console.log(`pastas que o passo nunca toca (funções e funções de borda): ${JSON.stringify(intocadas)}`);
+          const intocada = (rel) => {
+            const naBase = (publicada ? `${publicada}/${rel}` : rel).normalize("NFC");
+            return intocadas.some((d) => naBase.startsWith(`${d}/`));
+          };
+
+          // ---------------------------------------------------------------- a regra (cópia fiel da do servidor)
+
+          function casa(padrao, caminho) {
+            const c = caminho.normalize("NFC").replace(/^\/+/, "").toLowerCase();
+            const p = padrao.normalize("NFC").toLowerCase();
+            if (p.startsWith("*.")) return c.endsWith(p.slice(1));
+            if (p.endsWith("/")) return c.startsWith(p);
+            return c === p || c.startsWith(`${p}/`);
+          }
+
+          function formas(c) {
+            const out = [c];
+            if (publicada) out.push(`${publicada}${c}`);
+            if (base) out.push(`${base}/${publicada}${c}`.replace(/\/\//g, "/"));
+            return out;
+          }
+
+          function proibido(c) {
+            if (c.startsWith("/.sdh/") || CONFIGURACOES.includes(c)) return false;
+            return formas(c).some((f) => lista.some((p) => casa(p, f)));
+          }
+
+          // ---------------------------------------------------------------- os arquivos da pasta publicada
+
+          const raiz = resolve(process.cwd(), publicada || ".");
+          if (!existsSync(raiz) || !statSync(raiz).isDirectory()) {
+            // o servidor diz o que fazer quando a pasta publicada não veio (publish_ausente)
+            console.log(`a pasta publicada ${publicada || "."} não existe: nada a tirar.`);
+            process.exit(0);
+          }
+          const raizReal = realpathSync(raiz);
+          const dentroDaRaiz = (real) => real === raizReal || real.startsWith(raizReal + sep);
+
+          // cada arquivo: o caminho dentro da pasta publicada e, se ele foi achado através de um link para pasta, esse link.
+          // O link é seguido como o zip do pacote faz (o zip guarda o conteúdo do alvo); o laço de links é cortado
+          const arquivos = [];
+          function andar(dir, rel, link, acima) {
+            const nomes = readdirSync(dir).sort();
+            for (const nome of nomes) {
+              if (nome === ".git" || nome === "node_modules") continue;
+              const abs = join(dir, nome);
+              const r = rel ? `${rel}/${nome}` : nome;
+              let l;
+              try {
+                l = lstatSync(abs);
+              } catch {
+                continue;
+              }
+              if (l.isSymbolicLink()) {
+                let alvo;
+                try {
+                  alvo = statSync(abs);
+                } catch {
+                  continue; // link quebrado: não entra no pacote
+                }
+                if (alvo.isDirectory()) {
+                  const real = realpathSync(abs);
+                  if (acima.has(real)) continue;
+                  andar(abs, r, link ?? r, new Set([...acima, real]));
+                } else if (alvo.isFile()) arquivos.push({ rel: r, link, ehLink: true });
+              } else if (l.isDirectory()) {
+                andar(abs, r, link, new Set([...acima, realpathSync(abs)]));
+              } else if (l.isFile()) arquivos.push({ rel: r, link, ehLink: false });
+            }
+          }
+          andar(raiz, "", null, new Set([raizReal]));
+
+          const sai = (a) => !intocada(a.rel) && proibido(`/${a.rel}`);
+          const tirados = arquivos.filter(sai);
+          if (!tirados.length) {
+            console.log("nenhum arquivo da pasta publicada está na lista nunca publicar: nada a tirar.");
+            process.exit(0);
+          }
+
+          // ---------------------------------------------------------------- o que apagar
+
+          // arquivo achado direto: apaga ele (o link, nunca o alvo, quando é link de arquivo). Arquivo achado através de um link
+          // para pasta: apagá-lo apagaria o alvo, que pode estar fora da pasta publicada ou ser outro caminho do site. Só sai o
+          // link inteiro, e só quando tudo o que há dentro dele está na lista; senão o passo falha e nada é enviado
+          const linkInteiro = new Map();
+          for (const a of arquivos) if (a.link) linkInteiro.set(a.link, (linkInteiro.get(a.link) ?? true) && sai(a));
+          const apagar = new Set();
+          const presos = new Map();
+          for (const a of tirados) {
+            if (!a.link) apagar.add(a.rel);
+            else if (linkInteiro.get(a.link)) apagar.add(a.link);
+            else presos.set(a.link, [...(presos.get(a.link) ?? []), a.rel]);
+          }
+          if (presos.size) {
+            const [link, caminhos] = [...presos][0];
+            falhar(
+              `${caminhos.slice(0, MAX_NO_LOG).join(", ")} está(ão) na lista nunca publicar, mas fica(m) dentro de ${link}, que é um link para outra pasta, ` +
+                "e o fluxo nunca apaga através de um link. Tire o link do repositório, ou ponha na lista o link inteiro, e rode de novo. Nada foi enviado.",
+            );
+          }
+
+          const pastas = new Set();
+          for (const rel of [...apagar].sort()) {
+            const abs = join(raiz, rel);
+            // o caminho real tem de ficar dentro da pasta publicada; senão, nada é apagado e nada é enviado
+            if (!dentroDaRaiz(realpathSync(dirname(abs)))) falhar(`${rel} fica fora da pasta publicada no disco; o fluxo não apaga nada fora dela. Nada foi enviado.`);
+            if (lstatSync(abs).isDirectory()) falhar(`${rel} é uma pasta, e o fluxo só apaga arquivos e links. Nada foi enviado.`);
+            unlinkSync(abs);
+            for (let p = dirname(rel); p !== "." && p !== ""; p = dirname(p)) pastas.add(p);
+          }
+          // as pastas que ficaram vazias por causa disso, da mais funda para a mais rasa (a pasta publicada fica)
+          for (const p of [...pastas].sort((a, b) => b.split("/").length - a.split("/").length || (a < b ? 1 : -1))) {
+            const abs = join(raiz, p);
+            const l = lstatSync(abs, { throwIfNoEntry: false });
+            if (l && l.isDirectory() && readdirSync(abs).length === 0) rmdirSync(abs);
+          }
+
+          // ---------------------------------------------------------------- o que foi dito
+
+          const nomes = tirados.map((a) => a.rel).sort();
+          const mostrados = nomes.slice(0, MAX_NO_LOG);
+          const mais = nomes.length > MAX_NO_LOG ? ` (e mais ${nomes.length - MAX_NO_LOG})` : "";
+          console.log(`tirados do pacote ${nomes.length} arquivo(s) da lista nunca publicar${mais}:`);
+          for (const n of mostrados) console.log(`  ${n}`);
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            appendFileSync(
+              process.env.GITHUB_STEP_SUMMARY,
+              `### Tirado do pacote: ${nomes.length} arquivo(s) da lista nunca publicar\n${mostrados.map((n) => `- ${n}`).join("\n")}${mais ? `\n- ${mais.trim()}` : ""}\n`,
+            );
+          }
+          SDH_FIM_DO_NUNCA_PUBLICAR
+          node "$RUNNER_TEMP/sdh-nunca-publicar.mjs"
+
       - name: Montar o pacote do site
         shell: bash
         run: |
           zip -q -r "$RUNNER_TEMP/site.zip" . -x ".git/*" ".github/*" "node_modules/*" "*/node_modules/*"
           echo "pacote: $(wc -c < "$RUNNER_TEMP/site.zip") bytes"
+
+      - name: Guardar o pacote para o envio
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: seedrophost-site
+          path: ${{ runner.temp }}/site.zip
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
+  publicar:
+    name: SeeDropHost (ensaio-c6)
+    needs: construir
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    env:
+      SDH_URL: "https://painel.seedrophost.com"
+      SDH_SITE: "ensaio-c6"
+      SDH_COMANDO: "rm -rf privado ferramentas/*.ps1"
+    steps:
+      - name: Buscar o pacote
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: seedrophost-site
+          path: ${{ runner.temp }}/sdh-pacote
 
       - name: Enviar ao SeeDropHost
         shell: bash
@@ -346,7 +686,7 @@ jobs:
               codigo=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS -K - \
                 -o "$RUNNER_TEMP/resposta.json" -w '%{http_code}' -X POST \
                 -H "content-type: application/zip" -H "x-sdh-actor: github-actions" -H "x-sdh-comando: $hash" \
-                --data-binary "@$RUNNER_TEMP/site.zip" \
+                --data-binary "@$RUNNER_TEMP/sdh-pacote/site.zip" \
                 "$SDH_URL/v1/sites/$SDH_SITE/deploys/zip?origem=github-actions&construido=1") || codigo=000
             else
               codigo=000
@@ -362,5 +702,5 @@ jobs:
             exit 1
           fi
           jq -r --arg site "$SDH_SITE" '"### Enviado ao SeeDropHost", "- Versão: \(.deploy.id)", "- Prévia: \(.urls.deploy)",
-            (if .deploy.draft == 1 then "- Rascunho: nada mudou no ar; publique com sdh publish \($site) \(.deploy.id)" else "- No ar: \(.urls.site)" end),
+            (if .deploy.draft == 1 then "- Rascunho: nada mudou no ar; publique com a ferramenta publish_deploy do conector (site \($site), versão \(.deploy.id))" else "- No ar: \(.urls.site)" end),
             ((.deploy.report.avisos // [])[] | "- Aviso: \(.)")' "$RUNNER_TEMP/resposta.json" >> "$GITHUB_STEP_SUMMARY"
