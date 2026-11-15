@@ -31,13 +31,12 @@ jobs:
     permissions:
       contents: read
     env:
-      SDH_COMANDO: ""
+      SDH_COMANDO: "rm -rf privado ferramentas/*.ps1"
     steps:
       - name: Baixar o código
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
 
       - name: Rodar o comando de build
         shell: bash
@@ -331,7 +330,7 @@ jobs:
       - name: Tirar o que nunca vai ao ar
         shell: bash
         env:
-          SDH_NUNCA_PUBLICAR: "[\"privado/\",\"*.ps1\"]"
+          SDH_NUNCA_PUBLICAR: "[\"privado/\"]"
           SDH_PUBLICADA: "\"\""
           SDH_FUNCOES: "netlify/functions"
         run: |
@@ -668,7 +667,7 @@ jobs:
     env:
       SDH_URL: "https://painel.seedrophost.com"
       SDH_SITE: "ensaio-c6"
-      SDH_COMANDO: ""
+      SDH_COMANDO: "rm -rf privado ferramentas/*.ps1"
     steps:
       - name: Buscar o pacote
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
