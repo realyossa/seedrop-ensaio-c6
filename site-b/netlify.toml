@@ -1,0 +1,3 @@
+[build]
+  publish = "publico"
+  command = "mkdir -p publico && cp -r fonte/. publico/"
