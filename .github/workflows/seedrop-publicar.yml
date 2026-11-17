@@ -1,5 +1,4 @@
 # SeeDropHost: publica o site "ensaio-c6" a cada push na branch "main".
-# E também pela agenda "55 * * * *", em UTC (no horário de Brasília, 3 horas a menos), só na branch padrão do repositório.
 # Gerado pelo SeeDropHost (ferramenta get_publish_workflow do conector, site ensaio-c6). Este arquivo não guarda nenhum segredo.
 # O comando abaixo vem do seu netlify.toml/seedrop.toml. Se você mudar o comando lá, gere este arquivo de novo:
 # o SeeDropHost recusa o envio quando os dois divergem.
@@ -12,8 +11,6 @@ on:
   push:
     branches: ["main"]
     paths-ignore: ["**.md"]
-  schedule:
-    - cron: "55 * * * *"
   workflow_dispatch:
 
 concurrency:
